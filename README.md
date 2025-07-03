@@ -188,6 +188,104 @@ regularErrors, archiveErrors := checker.CheckAllNodes(ctx)
 healthy, healthyArchive := rpc.GetHealthyNodeCount()
 ```
 
+## Webhook Alerting
+
+The RPC helper includes built-in webhook alerting to notify you when nodes fail or recover.
+
+### Configuration
+
+```go
+config := &rpchelper.RPCConfig{
+    Nodes: []rpchelper.NodeConfig{
+        {URL: "https://your-primary-rpc.com"},
+        {URL: "https://your-backup-rpc.com"},
+    },
+    MaxRetries:     3,
+    RetryDelay:     time.Second,
+    MaxRetryDelay:  time.Minute,
+    RequestTimeout: 30 * time.Second,
+    
+    // Configure webhook alerts
+    WebhookConfig: &reporting.WebhookConfig{
+        URL:     "https://your-webhook-endpoint.com/alerts",
+        Timeout: 30 * time.Second,
+        Retries: 3,
+    },
+}
+
+rpc := rpchelper.NewRPCHelper(config)
+```
+
+### Automatic Alerts
+
+When configured, the RPC helper automatically sends alerts for:
+
+- **Node failures**: When individual nodes become unhealthy
+- **Node recovery**: When previously unhealthy nodes recover
+- **Critical failures**: When all nodes are unhealthy
+- **Initialization errors**: When nodes fail to initialize
+
+### Manual Alerts
+
+You can also send custom alerts:
+
+```go
+import "github.com/powerloom/rpc-helper/reporting"
+
+// Send different severity levels
+reporting.SendInfoAlert("myapp", "Application started successfully")
+reporting.SendWarningAlert("myapp", "High memory usage detected")
+reporting.SendCriticalAlert("myapp", "Database connection failed")
+
+// Send alert with custom timestamp
+reporting.SendFailureNotification("myapp", "Custom error occurred", 
+    time.Now().Format(time.RFC3339), "warning")
+```
+
+### Alert Format
+
+Alerts are sent as JSON to your webhook endpoint:
+
+```json
+{
+  "timestamp": "2024-01-15T10:30:00Z",
+  "process_name": "rpc-helper",
+  "error_msg": "Node https://rpc.example.com has become unhealthy: connection timeout",
+  "severity": "warning"
+}
+```
+
+### Environment Configuration
+
+```bash
+# Set webhook URL via environment variable
+export WEBHOOK_URL="https://your-webhook-endpoint.com/alerts"
+export WEBHOOK_TIMEOUT="30s"
+```
+
+```go
+// Configure from environment
+webhookURL := os.Getenv("WEBHOOK_URL")
+if webhookURL != "" {
+    config.WebhookConfig = &reporting.WebhookConfig{
+        URL:     webhookURL,
+        Timeout: 30 * time.Second,
+        Retries: 3,
+    }
+}
+```
+
+### Alert Management
+
+```go
+// Check current alert queue
+queueLength := len(reporting.RpcAlertsChannel)
+log.Printf("Alerts in queue: %d", queueLength)
+
+// The alert processor runs in background automatically
+// and sends alerts to your webhook with retry logic
+```
+
 ## Integration with Existing Code
 
 Replace your existing RPC client initialization:
