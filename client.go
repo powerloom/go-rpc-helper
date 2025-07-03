@@ -17,6 +17,8 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/ethereum/go-ethereum/rpc"
 	log "github.com/sirupsen/logrus"
+
+	"github.com/powerloom/rpc-helper/reporting"
 )
 
 // NodeConfig represents configuration for a single RPC node
@@ -26,12 +28,13 @@ type NodeConfig struct {
 
 // RPCConfig represents the configuration for the RPC helper
 type RPCConfig struct {
-	Nodes          []NodeConfig  `json:"nodes"`
-	ArchiveNodes   []NodeConfig  `json:"archive_nodes,omitempty"`
-	MaxRetries     int           `json:"max_retries"`
-	RetryDelay     time.Duration `json:"retry_delay"`
-	MaxRetryDelay  time.Duration `json:"max_retry_delay"`
-	RequestTimeout time.Duration `json:"request_timeout"`
+	Nodes          []NodeConfig             `json:"nodes"`
+	ArchiveNodes   []NodeConfig             `json:"archive_nodes,omitempty"`
+	MaxRetries     int                      `json:"max_retries"`
+	RetryDelay     time.Duration            `json:"retry_delay"`
+	MaxRetryDelay  time.Duration            `json:"max_retry_delay"`
+	RequestTimeout time.Duration            `json:"request_timeout"`
+	WebhookConfig  *reporting.WebhookConfig `json:"webhook_config,omitempty"`
 }
 
 // RPCNode represents an RPC node with its client and metadata
@@ -53,6 +56,7 @@ type RPCHelper struct {
 	nodeMutex      sync.RWMutex
 	logger         *log.Logger
 	initialized    bool
+	alertManager   *reporting.AlertManager
 }
 
 // RPCException represents an RPC error with detailed information
@@ -71,7 +75,7 @@ func (e *RPCException) Error() string {
 
 // NewRPCHelper creates a new RPC helper instance
 func NewRPCHelper(config *RPCConfig) *RPCHelper {
-	return &RPCHelper{
+	rpcHelper := &RPCHelper{
 		config:         config,
 		nodes:          make([]*RPCNode, 0),
 		archiveNodes:   make([]*RPCNode, 0),
@@ -79,6 +83,13 @@ func NewRPCHelper(config *RPCConfig) *RPCHelper {
 		logger:         log.New(),
 		initialized:    false,
 	}
+
+	// Initialize AlertManager if webhook configuration is provided
+	if config.WebhookConfig != nil {
+		rpcHelper.alertManager = reporting.NewAlertManager(*config.WebhookConfig)
+	}
+
+	return rpcHelper
 }
 
 // Initialize sets up the RPC clients for all configured nodes
@@ -88,6 +99,11 @@ func (r *RPCHelper) Initialize(ctx context.Context) error {
 
 	if r.initialized {
 		return nil
+	}
+
+	// Start alert processor if AlertManager is configured
+	if r.alertManager != nil {
+		r.alertManager.StartAlertProcessor(ctx)
 	}
 
 	// Initialize regular nodes
@@ -120,6 +136,9 @@ func (r *RPCHelper) Initialize(ctx context.Context) error {
 	}
 
 	if len(r.nodes) == 0 {
+		if r.alertManager != nil {
+			reporting.SendCriticalAlert("rpc-helper", "No RPC nodes available after initialization")
+		}
 		return fmt.Errorf("no RPC nodes available")
 	}
 
@@ -218,9 +237,21 @@ func (r *RPCHelper) switchToNode(nodeURL string, useArchive bool) {
 
 	for _, node := range nodes {
 		if node.URL == nodeURL {
+			wasUnhealthy := !node.IsHealthy
 			node.IsHealthy = true
 			node.LastUsed = time.Now()
 			r.logger.Infof("Node %s is now healthy and active", nodeURL)
+
+			// Send alert for node recovery if it was previously unhealthy
+			if wasUnhealthy && r.alertManager != nil {
+				nodeType := "regular"
+				if useArchive {
+					nodeType = "archive"
+				}
+				reporting.SendInfoAlert("rpc-helper",
+					fmt.Sprintf("Node %s (%s) has recovered and is now healthy", nodeURL, nodeType))
+			}
+
 			return
 		}
 	}
@@ -231,22 +262,36 @@ func (r *RPCHelper) markNodeUnhealthy(nodeURL string, err error) {
 	r.nodeMutex.Lock()
 	defer r.nodeMutex.Unlock()
 
-	// Check regular nodes
 	for _, node := range r.nodes {
 		if node.URL == nodeURL {
+			wasHealthy := node.IsHealthy
 			node.IsHealthy = false
 			node.LastError = err
 			r.logger.Warnf("Marked node unhealthy: %s, error: %v", nodeURL, err)
+
+			// Send alert for node failure if it was previously healthy
+			if wasHealthy && r.alertManager != nil {
+				reporting.SendWarningAlert("rpc-helper",
+					fmt.Sprintf("Full node %s has become unhealthy: %v", nodeURL, err))
+			}
+
 			return
 		}
 	}
 
-	// Check archive nodes
 	for _, node := range r.archiveNodes {
 		if node.URL == nodeURL {
+			wasHealthy := node.IsHealthy
 			node.IsHealthy = false
 			node.LastError = err
 			r.logger.Warnf("Marked archive node unhealthy: %s, error: %v", nodeURL, err)
+
+			// Send alert for archive node failure if it was previously healthy
+			if wasHealthy && r.alertManager != nil {
+				reporting.SendWarningAlert("rpc-helper",
+					fmt.Sprintf("Archive node %s has become unhealthy: %v", nodeURL, err))
+			}
+
 			return
 		}
 	}
@@ -311,6 +356,13 @@ func (r *RPCHelper) executeWithRetryAndFailover(ctx context.Context, operation f
 		if useArchive {
 			nodeType = "archive"
 		}
+
+		// Send critical alert for all nodes being unhealthy
+		if r.alertManager != nil {
+			reporting.SendCriticalAlert("rpc-helper",
+				fmt.Sprintf("All %s nodes are unhealthy! This is a critical issue.", nodeType))
+		}
+
 		r.logger.Errorf("All %s nodes are unhealthy! This is a critical issue.", nodeType)
 	}
 
