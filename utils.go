@@ -36,6 +36,32 @@ func NewRPCConfigFromURLs(urls []string, archiveURLs []string) *RPCConfig {
 	return config
 }
 
+// NewRPCConfig creates an RPC config with custom retry and timeout parameters
+func NewRPCConfig(
+	urls []string,
+	archiveURLs []string,
+	maxRetries int,
+	retryDelay time.Duration,
+	maxRetryDelay time.Duration,
+	requestTimeout time.Duration) *RPCConfig {
+	config := &RPCConfig{
+		MaxRetries:     maxRetries,
+		RetryDelay:     retryDelay,
+		MaxRetryDelay:  maxRetryDelay,
+		RequestTimeout: requestTimeout,
+	}
+
+	for _, url := range urls {
+		config.Nodes = append(config.Nodes, NodeConfig{URL: url})
+	}
+
+	for _, url := range archiveURLs {
+		config.ArchiveNodes = append(config.ArchiveNodes, NodeConfig{URL: url})
+	}
+
+	return config
+}
+
 // HealthChecker provides utilities for checking node health
 type HealthChecker struct {
 	rpc *RPCHelper
