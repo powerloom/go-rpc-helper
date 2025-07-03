@@ -165,9 +165,11 @@ func (r *RPCHelper) createNode(ctx context.Context, url string) (*RPCNode, error
 }
 
 // getCurrentNode returns the current healthy node, with fallback logic
+// Always tries the first node first, then tries subsequent nodes in order
+// Periodically retries the primary node even when marked unhealthy
 func (r *RPCHelper) getCurrentNode(useArchive bool) (*RPCNode, error) {
-	r.nodeMutex.RLock()
-	defer r.nodeMutex.RUnlock()
+	r.nodeMutex.Lock()
+	defer r.nodeMutex.Unlock()
 
 	nodes := r.nodes
 	if useArchive && len(r.archiveNodes) > 0 {
@@ -178,27 +180,33 @@ func (r *RPCHelper) getCurrentNode(useArchive bool) (*RPCNode, error) {
 		return nil, fmt.Errorf("no nodes available")
 	}
 
-	// Try current node first
-	if r.currentNodeIdx < len(nodes) {
-		node := nodes[r.currentNodeIdx]
-		if node.IsHealthy {
-			return node, nil
+	primaryNode := nodes[0]
+
+	// Always try the first node (primary) if it's healthy
+	if primaryNode.IsHealthy {
+		r.currentNodeIdx = 0
+		return primaryNode, nil
+	}
+
+	// If primary node is unhealthy, occasionally retry it (every 10 requests)
+	r.currentNodeIdx++
+	if r.currentNodeIdx%10 == 0 {
+		r.logger.Infof("Periodic retry attempt for primary node %s", primaryNode.URL)
+		return primaryNode, nil
+	}
+
+	// Otherwise, try subsequent nodes in order
+	for i := 1; i < len(nodes); i++ {
+		if nodes[i].IsHealthy {
+			return nodes[i], nil
 		}
 	}
 
-	// Find next healthy node
-	for i := 0; i < len(nodes); i++ {
-		idx := (r.currentNodeIdx + i) % len(nodes)
-		if nodes[idx].IsHealthy {
-			r.currentNodeIdx = idx
-			return nodes[idx], nil
-		}
-	}
-
-	return nil, fmt.Errorf("no healthy nodes available")
+	// If all nodes are unhealthy, still return the first node to attempt retry
+	return primaryNode, nil
 }
 
-// switchToNode switches the current node to a working one
+// switchToNode marks a node as healthy and updates its usage timestamp
 func (r *RPCHelper) switchToNode(nodeURL string, useArchive bool) {
 	r.nodeMutex.Lock()
 	defer r.nodeMutex.Unlock()
@@ -208,12 +216,11 @@ func (r *RPCHelper) switchToNode(nodeURL string, useArchive bool) {
 		nodes = r.archiveNodes
 	}
 
-	for i, node := range nodes {
+	for _, node := range nodes {
 		if node.URL == nodeURL {
-			r.currentNodeIdx = i
 			node.IsHealthy = true
 			node.LastUsed = time.Now()
-			r.logger.Infof("Switched to node: %s", nodeURL)
+			r.logger.Infof("Node %s is now healthy and active", nodeURL)
 			return
 		}
 	}
@@ -286,7 +293,7 @@ func (r *RPCHelper) executeWithRetryAndFailover(ctx context.Context, operation f
 		cancel()
 
 		if err == nil {
-			// Success! Mark node as healthy and switch to it
+			// Success! Mark node as healthy and update last used time
 			r.switchToNode(node.URL, useArchive)
 			return lastResult, nil
 		}
@@ -295,6 +302,16 @@ func (r *RPCHelper) executeWithRetryAndFailover(ctx context.Context, operation f
 		r.markNodeUnhealthy(node.URL, err)
 		r.logger.Warnf("Node %s failed after retries: %v", node.URL, err)
 		lastErr = err
+	}
+
+	// Check if all nodes are unhealthy and log critical error
+	healthyNodes, healthyArchiveNodes := r.GetHealthyNodeCount()
+	if healthyNodes == 0 && (!useArchive || healthyArchiveNodes == 0) {
+		nodeType := "regular"
+		if useArchive {
+			nodeType = "archive"
+		}
+		r.logger.Errorf("All %s nodes are unhealthy! This is a critical issue.", nodeType)
 	}
 
 	return nil, fmt.Errorf("all nodes failed, last error: %w", lastErr)
