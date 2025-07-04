@@ -56,7 +56,6 @@ type RPCHelper struct {
 	nodeMutex      sync.RWMutex
 	logger         *log.Logger
 	initialized    bool
-	alertManager   *reporting.AlertManager
 }
 
 // RPCException represents an RPC error with detailed information
@@ -84,9 +83,9 @@ func NewRPCHelper(config *RPCConfig) *RPCHelper {
 		initialized:    false,
 	}
 
-	// Initialize AlertManager if webhook configuration is provided
+	// Initialize ReportingService if webhook configuration is provided
 	if config.WebhookConfig != nil {
-		rpcHelper.alertManager = reporting.NewAlertManager(*config.WebhookConfig)
+		reporting.InitializeReportingService(config.WebhookConfig.URL, config.WebhookConfig.Timeout)
 	}
 
 	return rpcHelper
@@ -101,22 +100,16 @@ func (r *RPCHelper) Initialize(ctx context.Context) error {
 		return nil
 	}
 
-	// Start alert processor if AlertManager is configured
-	if r.alertManager != nil {
-		r.alertManager.StartAlertProcessor(ctx)
-	}
+	var failedNodes []string
 
+	// Use the passed context for initialization tasks (with timeout)
 	// Initialize regular nodes
 	for _, nodeConfig := range r.config.Nodes {
 		node, err := r.createNode(ctx, nodeConfig.URL)
 		if err != nil {
 			r.logger.Warnf("Failed to initialize node %s: %v", nodeConfig.URL, err)
-			// Add node anyway for potential retry later
-			node = &RPCNode{
-				URL:       nodeConfig.URL,
-				IsHealthy: false,
-				LastError: err,
-			}
+			failedNodes = append(failedNodes, nodeConfig.URL)
+			continue
 		}
 		r.nodes = append(r.nodes, node)
 	}
@@ -126,20 +119,21 @@ func (r *RPCHelper) Initialize(ctx context.Context) error {
 		node, err := r.createNode(ctx, nodeConfig.URL)
 		if err != nil {
 			r.logger.Warnf("Failed to initialize archive node %s: %v", nodeConfig.URL, err)
-			node = &RPCNode{
-				URL:       nodeConfig.URL,
-				IsHealthy: false,
-				LastError: err,
-			}
+			failedNodes = append(failedNodes, nodeConfig.URL)
+			continue // Skip adding this node
 		}
 		r.archiveNodes = append(r.archiveNodes, node)
 	}
 
 	if len(r.nodes) == 0 {
-		if r.alertManager != nil {
-			reporting.SendCriticalAlert("rpc-helper", "No RPC nodes available after initialization")
-		}
-		return fmt.Errorf("no RPC nodes available")
+		reporting.SendCriticalAlert("rpc-helper", "No RPC nodes available after initialization")
+		return fmt.Errorf("no RPC nodes available - all nodes failed to initialize")
+	}
+
+	if len(failedNodes) > 0 {
+		r.logger.Warnf("Failed to initialize %d nodes: %v", len(failedNodes), failedNodes)
+		reporting.SendWarningAlert("rpc-helper",
+			fmt.Sprintf("Failed to initialize %d nodes during startup: %v", len(failedNodes), failedNodes))
 	}
 
 	r.initialized = true
@@ -201,28 +195,35 @@ func (r *RPCHelper) getCurrentNode(useArchive bool) (*RPCNode, error) {
 
 	primaryNode := nodes[0]
 
-	// Always try the first node (primary) if it's healthy
-	if primaryNode.IsHealthy {
+	// Always try the first node (primary)
+	if primaryNode.IsHealthy && primaryNode.EthClient != nil {
 		r.currentNodeIdx = 0
 		return primaryNode, nil
 	}
 
 	// If primary node is unhealthy, occasionally retry it (every 10 requests)
 	r.currentNodeIdx++
-	if r.currentNodeIdx%10 == 0 {
+	if r.currentNodeIdx%10 == 0 && primaryNode.EthClient != nil {
 		r.logger.Infof("Periodic retry attempt for primary node %s", primaryNode.URL)
 		return primaryNode, nil
 	}
 
 	// Otherwise, try subsequent nodes in order
 	for i := 1; i < len(nodes); i++ {
-		if nodes[i].IsHealthy {
+		if nodes[i].IsHealthy && nodes[i].EthClient != nil {
 			return nodes[i], nil
 		}
 	}
 
-	// If all nodes are unhealthy, still return the first node to attempt retry
-	return primaryNode, nil
+	// If all nodes are unhealthy or have nil clients, try the first node with valid clients
+	for _, node := range nodes {
+		if node.EthClient != nil {
+			return node, nil
+		}
+	}
+
+	// If no nodes have valid clients, return an error
+	return nil, fmt.Errorf("no nodes with valid connections available")
 }
 
 // switchToNode marks a node as healthy and updates its usage timestamp
@@ -240,10 +241,10 @@ func (r *RPCHelper) switchToNode(nodeURL string, useArchive bool) {
 			wasUnhealthy := !node.IsHealthy
 			node.IsHealthy = true
 			node.LastUsed = time.Now()
-			r.logger.Infof("Node %s is now healthy and active", nodeURL)
 
 			// Send alert for node recovery if it was previously unhealthy
-			if wasUnhealthy && r.alertManager != nil {
+			if wasUnhealthy {
+				r.logger.Infof("Node %s is now healthy and active", nodeURL)
 				nodeType := "regular"
 				if useArchive {
 					nodeType = "archive"
@@ -270,7 +271,7 @@ func (r *RPCHelper) markNodeUnhealthy(nodeURL string, err error) {
 			r.logger.Warnf("Marked node unhealthy: %s, error: %v", nodeURL, err)
 
 			// Send alert for node failure if it was previously healthy
-			if wasHealthy && r.alertManager != nil {
+			if wasHealthy {
 				reporting.SendWarningAlert("rpc-helper",
 					fmt.Sprintf("Full node %s has become unhealthy: %v", nodeURL, err))
 			}
@@ -287,7 +288,7 @@ func (r *RPCHelper) markNodeUnhealthy(nodeURL string, err error) {
 			r.logger.Warnf("Marked archive node unhealthy: %s, error: %v", nodeURL, err)
 
 			// Send alert for archive node failure if it was previously healthy
-			if wasHealthy && r.alertManager != nil {
+			if wasHealthy {
 				reporting.SendWarningAlert("rpc-helper",
 					fmt.Sprintf("Archive node %s has become unhealthy: %v", nodeURL, err))
 			}
@@ -358,10 +359,8 @@ func (r *RPCHelper) executeWithRetryAndFailover(ctx context.Context, operation f
 		}
 
 		// Send critical alert for all nodes being unhealthy
-		if r.alertManager != nil {
-			reporting.SendCriticalAlert("rpc-helper",
-				fmt.Sprintf("All %s nodes are unhealthy! This is a critical issue.", nodeType))
-		}
+		reporting.SendCriticalAlert("rpc-helper",
+			fmt.Sprintf("All %s nodes are unhealthy! This is a critical issue.", nodeType))
 
 		r.logger.Errorf("All %s nodes are unhealthy! This is a critical issue.", nodeType)
 	}

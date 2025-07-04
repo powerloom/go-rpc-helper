@@ -2,7 +2,7 @@ package reporting
 
 import (
 	"bytes"
-	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -41,26 +41,68 @@ type WebhookConfig struct {
 	Retries int
 }
 
-// AlertManager manages webhook alert sending
-type AlertManager struct {
-	config     WebhookConfig
-	httpClient *http.Client
+var reportingClient *ReportingService
+
+type ReportingService struct {
+	url    string
+	client *http.Client
 }
 
-// NewAlertManager creates a new AlertManager with the given webhook configuration
-func NewAlertManager(config WebhookConfig) *AlertManager {
-	if config.Timeout == 0 {
-		config.Timeout = 30 * time.Second
+func InitializeReportingService(url string, timeout time.Duration) {
+	reportingClient = &ReportingService{
+		url: url,
+		client: &http.Client{
+			Timeout: timeout,
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			},
+		},
 	}
-	if config.Retries == 0 {
-		config.Retries = 3
+	go StartListening()
+}
+
+func StartListening() {
+	log.Info("Starting alert processor")
+	for issue := range RpcAlertsChannel {
+		SendFailureNotificationDirect(issue)
+	}
+}
+
+// SendFailureNotificationDirect sends the alert directly using the working pattern
+func SendFailureNotificationDirect(issue RpcAlert) {
+	if reportingClient == nil {
+		log.Warn("Reporting client not initialized")
+		return
 	}
 
-	return &AlertManager{
-		config: config,
-		httpClient: &http.Client{
-			Timeout: config.Timeout,
-		},
+	jsonData, err := json.Marshal(issue)
+	if err != nil {
+		log.Errorln("Unable to marshal notification: ", issue)
+		return
+	}
+
+	req, err := http.NewRequest("POST", reportingClient.url, bytes.NewBuffer(jsonData))
+	if err != nil {
+		log.Errorln("Error creating request: ", err)
+		return
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	// Send the request
+	resp, err := reportingClient.client.Do(req)
+	if err != nil {
+		log.Errorf("Error sending request for issue %s: %s\n", issue.String(), err)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Here you can handle response or further actions
+	log.Debugln("Reporting service response status: ", resp.Status)
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		log.Infof("Successfully sent alert: %s", issue.String())
+	} else {
+		log.Errorf("Failed to send alert, status: %d", resp.StatusCode)
 	}
 }
 
@@ -73,77 +115,14 @@ func SendFailureNotification(processName, errorMsg, timestamp, severity string) 
 		severity,
 	}
 
+	log.Debugf("Sending failure notification: %s", issue.String())
+
 	select {
 	case RpcAlertsChannel <- issue:
 		log.Debugln("Issue sent to channel: ", issue)
 	default:
 		log.Errorln("Issue channel is full, dropping issue: ", issue)
 	}
-}
-
-// SendToWebhook sends an alert to the configured webhook endpoint
-func (am *AlertManager) SendToWebhook(ctx context.Context, alert RpcAlert) error {
-	if am.config.URL == "" {
-		return fmt.Errorf("webhook URL not configured")
-	}
-
-	jsonData, err := json.Marshal(alert)
-	if err != nil {
-		return fmt.Errorf("failed to marshal alert to JSON: %w", err)
-	}
-
-	var lastErr error
-	for i := 0; i < am.config.Retries; i++ {
-		if i > 0 {
-			log.Warnf("Retrying webhook send (attempt %d/%d)", i+1, am.config.Retries)
-			time.Sleep(time.Duration(i) * time.Second) // Simple backoff
-		}
-
-		req, err := http.NewRequestWithContext(ctx, "POST", am.config.URL, bytes.NewBuffer(jsonData))
-		if err != nil {
-			lastErr = fmt.Errorf("failed to create request: %w", err)
-			continue
-		}
-
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("User-Agent", "go-rpc-helper/1.0")
-
-		resp, err := am.httpClient.Do(req)
-		if err != nil {
-			lastErr = fmt.Errorf("failed to send request: %w", err)
-			continue
-		}
-
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			resp.Body.Close()
-			log.Infof("Successfully sent alert to webhook: %s", alert.String())
-			return nil
-		}
-
-		resp.Body.Close()
-		lastErr = fmt.Errorf("webhook returned non-success status: %d", resp.StatusCode)
-	}
-
-	return fmt.Errorf("failed to send alert after %d retries: %w", am.config.Retries, lastErr)
-}
-
-// StartAlertProcessor starts a goroutine that processes alerts from the channel and sends them to webhook
-func (am *AlertManager) StartAlertProcessor(ctx context.Context) {
-	go func() {
-		log.Info("Starting alert processor")
-		for {
-			select {
-			case alert := <-RpcAlertsChannel:
-				log.Debugf("Processing alert: %s", alert.String())
-				if err := am.SendToWebhook(ctx, alert); err != nil {
-					log.Errorf("Failed to send alert to webhook: %v", err)
-				}
-			case <-ctx.Done():
-				log.Info("Alert processor stopped")
-				return
-			}
-		}
-	}()
 }
 
 // SendAlertWithTimestamp is a convenience function that sends an alert with the current timestamp
