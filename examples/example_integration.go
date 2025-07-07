@@ -8,8 +8,8 @@ import (
 
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
-	rpchelper "github.com/powerloom/rpc-helper"
-	"github.com/powerloom/rpc-helper/reporting"
+	rpchelper "github.com/powerloom/go-rpc-helper"
+	"github.com/powerloom/go-rpc-helper/reporting"
 )
 
 // ExampleIntegration shows how to integrate the RPC helper with your existing codebase

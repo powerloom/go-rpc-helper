@@ -1,4 +1,4 @@
-module github.com/powerloom/rpc-helper
+module github.com/powerloom/go-rpc-helper
 
 go 1.21
 

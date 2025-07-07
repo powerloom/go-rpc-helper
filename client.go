@@ -18,7 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/rpc"
 	log "github.com/sirupsen/logrus"
 
-	"github.com/powerloom/rpc-helper/reporting"
+	"github.com/powerloom/go-rpc-helper/reporting"
 )
 
 // NodeConfig represents configuration for a single RPC node
