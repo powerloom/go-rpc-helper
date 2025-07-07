@@ -16,7 +16,7 @@ A robust, production-ready Ethereum RPC client wrapper with automatic failover, 
 ## Installation
 
 ```bash
-go get github.com/powerloom/rpc-helper
+go get github.com/powerloom/go-rpc-helper
 ```
 
 ## Quick Start
@@ -30,7 +30,7 @@ import (
     "math/big"
     "time"
 
-    rpchelper "github.com/powerloom/rpc-helper"
+    rpchelper "github.com/powerloom/go-rpc-helper"
 )
 
 func main() {
@@ -230,7 +230,7 @@ When configured, the RPC helper automatically sends alerts for:
 You can also send custom alerts:
 
 ```go
-import "github.com/powerloom/rpc-helper/reporting"
+import "github.com/powerloom/go-rpc-helper/reporting"
 
 // Send different severity levels
 reporting.SendInfoAlert("myapp", "Application started successfully")
