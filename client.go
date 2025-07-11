@@ -333,8 +333,8 @@ func (r *RPCHelper) calculateRequiredSkips(failureCount int, isPrimary bool) int
 	return 40
 }
 
-// switchToNode marks a node as healthy and updates its usage timestamp
-func (r *RPCHelper) switchToNode(nodeURL string, useArchive bool) {
+// markNodeHealthy marks a node as healthy and updates its usage timestamp
+func (r *RPCHelper) markNodeHealthy(nodeURL string, useArchive bool) {
 	r.nodeMutex.Lock()
 	defer r.nodeMutex.Unlock()
 
@@ -467,7 +467,7 @@ func (r *RPCHelper) executeWithRetryAndFailover(ctx context.Context, operation f
 
 		if err == nil {
 			// Success! Mark node as healthy and update last used time
-			r.switchToNode(node.URL, useArchive)
+			r.markNodeHealthy(node.URL, useArchive)
 			return lastResult, nil
 		}
 
