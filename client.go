@@ -125,6 +125,14 @@ func (r *RPCHelper) Initialize(ctx context.Context) error {
 		return nil
 	}
 
+	// Validate configuration
+	if r.config == nil {
+		return fmt.Errorf("configuration is nil")
+	}
+	if len(r.config.Nodes) == 0 && len(r.config.ArchiveNodes) == 0 {
+		return fmt.Errorf("no nodes configured")
+	}
+
 	var failedNodes []string
 
 	// Use the passed context for initialization tasks (with timeout)
@@ -335,6 +343,10 @@ func (r *RPCHelper) switchToNode(nodeURL string, useArchive bool) {
 		nodes = r.archiveNodes
 	}
 
+	if nodes == nil {
+		return
+	}
+
 	for _, node := range nodes {
 		if node.URL == nodeURL {
 			wasUnhealthy := !node.IsHealthy
@@ -421,6 +433,13 @@ func (r *RPCHelper) executeWithRetryAndFailover(ctx context.Context, operation f
 
 	// Try each node with retries
 	for nodeAttempt := 0; nodeAttempt < len(nodes); nodeAttempt++ {
+		// Check if context is already cancelled before attempting
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
 		node, err := r.getCurrentNode(useArchive)
 		if err != nil {
 			return nil, err
@@ -541,8 +560,22 @@ func (r *RPCHelper) TransactionByHash(ctx context.Context, hash common.Hash) (*t
 		return nil, false, err
 	}
 
-	resultMap := result.(map[string]interface{})
-	return resultMap["tx"].(*types.Transaction), resultMap["isPending"].(bool), nil
+	resultMap, ok := result.(map[string]interface{})
+	if !ok {
+		return nil, false, fmt.Errorf("unexpected result type")
+	}
+
+	tx, ok := resultMap["tx"].(*types.Transaction)
+	if !ok {
+		return nil, false, fmt.Errorf("unexpected transaction type")
+	}
+
+	isPending, ok := resultMap["isPending"].(bool)
+	if !ok {
+		return nil, false, fmt.Errorf("unexpected isPending type")
+	}
+
+	return tx, isPending, nil
 }
 
 // TransactionReceipt returns the receipt of a transaction by transaction hash
