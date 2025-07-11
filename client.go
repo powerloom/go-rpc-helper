@@ -421,7 +421,7 @@ func (r *RPCHelper) markNodeUnhealthy(nodeURL string, err error) {
 // executeWithRetryAndFailover executes a function with retry logic and node failover
 func (r *RPCHelper) executeWithRetryAndFailover(ctx context.Context, operation func(*RPCNode) (interface{}, error), useArchive bool) (interface{}, error) {
 	var lastErr error
-	var lastResult interface{}
+
 	nodes := r.nodes
 	if useArchive && len(r.archiveNodes) > 0 {
 		nodes = r.archiveNodes
@@ -431,15 +431,27 @@ func (r *RPCHelper) executeWithRetryAndFailover(ctx context.Context, operation f
 		return nil, fmt.Errorf("no nodes available")
 	}
 
-	// Try each node with retries
-	for nodeAttempt := 0; nodeAttempt < len(nodes); nodeAttempt++ {
-		// Check if context is already cancelled before attempting
+	// Get the number of healthy nodes to determine how many attempts to make
+	healthyNodes, healthyArchiveNodes := r.GetHealthyNodeCount()
+	maxAttempts := healthyNodes
+	if useArchive {
+		maxAttempts = healthyArchiveNodes
+	}
+
+	// If no healthy nodes, try at least once (getCurrentNode will return fallback)
+	if maxAttempts == 0 {
+		maxAttempts = 1
+	}
+
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		// Check if context is already cancelled
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		default:
 		}
 
+		// Get the best available node
 		node, err := r.getCurrentNode(useArchive)
 		if err != nil {
 			return nil, err
@@ -450,14 +462,15 @@ func (r *RPCHelper) executeWithRetryAndFailover(ctx context.Context, operation f
 		backoffStrategy.MaxElapsedTime = r.config.MaxRetryDelay
 		backoffStrategy.InitialInterval = r.config.RetryDelay
 
-		// Retry operation on current node
+		// Retry operation on current node with exponential backoff
+		var result interface{}
 		retryOperation := func() error {
-			result, err := operation(node)
+			var err error
+			result, err = operation(node)
 			if err != nil {
 				lastErr = err
 				return err
 			}
-			lastResult = result
 			return nil
 		}
 
@@ -466,33 +479,32 @@ func (r *RPCHelper) executeWithRetryAndFailover(ctx context.Context, operation f
 		cancel()
 
 		if err == nil {
-			// Success! Mark node as healthy and update last used time
+			// Success! Mark node as healthy
 			r.markNodeHealthy(node.URL, useArchive)
-			return lastResult, nil
+			return result, nil
 		}
 
-		// Mark current node as unhealthy and try next
+		// Mark current node as unhealthy
 		r.markNodeUnhealthy(node.URL, err)
 		r.logger.Warnf("Node %s failed after retries: %v", node.URL, err)
 		lastErr = err
 	}
 
-	// Check if all nodes are unhealthy and log critical error
-	healthyNodes, healthyArchiveNodes := r.GetHealthyNodeCount()
+	// If we get here, all attempts failed
+	healthyNodes, healthyArchiveNodes = r.GetHealthyNodeCount()
 	if healthyNodes == 0 && (!useArchive || healthyArchiveNodes == 0) {
 		nodeType := "regular"
 		if useArchive {
 			nodeType = "archive"
 		}
 
-		// Send critical alert for all nodes being unhealthy
 		reporting.SendCriticalAlert("rpc-helper",
 			fmt.Sprintf("All %s nodes are unhealthy! This is a critical issue.", nodeType))
 
 		r.logger.Errorf("All %s nodes are unhealthy! This is a critical issue.", nodeType)
 	}
 
-	return nil, fmt.Errorf("all nodes failed, last error: %w", lastErr)
+	return nil, fmt.Errorf("all available nodes failed, last error: %w", lastErr)
 }
 
 // BlockByNumber retrieves a block by number
