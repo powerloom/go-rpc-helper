@@ -62,6 +62,38 @@ func NewRPCConfig(
 	return config
 }
 
+// NewRPCConfigWithRetrySchedule creates an RPC config with custom retry schedule
+func NewRPCConfigWithRetrySchedule(
+	urls []string,
+	archiveURLs []string,
+	primaryRetrySchedule []int,
+	secondaryRetrySchedule []int,
+	minRetryTime time.Duration) *RPCConfig {
+
+	config := DefaultRPCConfig()
+
+	// Set custom retry schedule
+	if len(primaryRetrySchedule) > 0 {
+		config.PrimaryRetryAfterRequests = primaryRetrySchedule
+	}
+	if len(secondaryRetrySchedule) > 0 {
+		config.SecondaryRetryAfterRequests = secondaryRetrySchedule
+	}
+	if minRetryTime > 0 {
+		config.MinRetryTime = minRetryTime
+	}
+
+	// Add nodes
+	for _, url := range urls {
+		config.Nodes = append(config.Nodes, NodeConfig{URL: url})
+	}
+	for _, url := range archiveURLs {
+		config.ArchiveNodes = append(config.ArchiveNodes, NodeConfig{URL: url})
+	}
+
+	return config
+}
+
 // HealthChecker provides utilities for checking node health
 type HealthChecker struct {
 	rpc *RPCHelper

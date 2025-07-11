@@ -35,16 +35,24 @@ type RPCConfig struct {
 	MaxRetryDelay  time.Duration            `json:"max_retry_delay"`
 	RequestTimeout time.Duration            `json:"request_timeout"`
 	WebhookConfig  *reporting.WebhookConfig `json:"webhook_config,omitempty"`
+
+	// Request-based retry configuration
+	PrimaryRetryAfterRequests   []int         `json:"primary_retry_after_requests,omitempty"`   // Requests to skip for primary node [5, 10, 20]
+	SecondaryRetryAfterRequests []int         `json:"secondary_retry_after_requests,omitempty"` // Requests to skip for secondary nodes [10, 20, 40]
+	MinRetryTime                time.Duration `json:"min_retry_time,omitempty"`                 // Minimum time between retries (default: 5s)
 }
 
 // RPCNode represents an RPC node with its client and metadata
 type RPCNode struct {
-	URL       string
-	EthClient *ethclient.Client
-	RPCClient *rpc.Client
-	IsHealthy bool
-	LastError error
-	LastUsed  time.Time
+	URL          string
+	EthClient    *ethclient.Client
+	RPCClient    *rpc.Client
+	IsHealthy    bool
+	LastError    error
+	LastUsed     time.Time
+	FailureCount int       // Number of consecutive failures
+	SkipCount    int       // Requests skipped since marked unhealthy
+	LastFailTime time.Time // When the node last failed
 }
 
 // RPCHelper is the main RPC client wrapper
@@ -72,8 +80,25 @@ func (e *RPCException) Error() string {
 		e.ExtraInfo, e.NodeURL, e.UnderlyingError)
 }
 
+// setConfigDefaults sets default values for optional configuration fields
+func setConfigDefaults(config *RPCConfig) {
+	// Set default retry counts if not specified
+	if len(config.PrimaryRetryAfterRequests) == 0 {
+		config.PrimaryRetryAfterRequests = []int{5, 10, 20}
+	}
+	if len(config.SecondaryRetryAfterRequests) == 0 {
+		config.SecondaryRetryAfterRequests = []int{10, 20, 40}
+	}
+	if config.MinRetryTime == 0 {
+		config.MinRetryTime = 5 * time.Second
+	}
+}
+
 // NewRPCHelper creates a new RPC helper instance
 func NewRPCHelper(config *RPCConfig) *RPCHelper {
+	// Set defaults for optional fields
+	setConfigDefaults(config)
+
 	rpcHelper := &RPCHelper{
 		config:         config,
 		nodes:          make([]*RPCNode, 0),
@@ -169,17 +194,23 @@ func (r *RPCHelper) createNode(ctx context.Context, url string) (*RPCNode, error
 	}
 
 	return &RPCNode{
-		URL:       url,
-		EthClient: ethClient,
-		RPCClient: rpcClient,
-		IsHealthy: true,
-		LastUsed:  time.Now(),
+		URL:          url,
+		EthClient:    ethClient,
+		RPCClient:    rpcClient,
+		IsHealthy:    true,
+		LastUsed:     time.Now(),
+		FailureCount: 0,
+		SkipCount:    0,
+		LastFailTime: time.Time{},
 	}, nil
 }
 
-// getCurrentNode returns the current healthy node, with fallback logic
-// Always tries the first node first, then tries subsequent nodes in order
-// Periodically retries the primary node even when marked unhealthy
+// getCurrentNode returns the current node with request-based recovery
+// 1. Try primary node first (if healthy)
+// 2. Check if primary node is ready for recovery (before checking secondaries)
+// 3. Try secondary nodes in order (if healthy)
+// 4. Check secondary nodes for retry readiness
+// 5. Force primary node as final fallback
 func (r *RPCHelper) getCurrentNode(useArchive bool) (*RPCNode, error) {
 	r.nodeMutex.Lock()
 	defer r.nodeMutex.Unlock()
@@ -193,37 +224,105 @@ func (r *RPCHelper) getCurrentNode(useArchive bool) (*RPCNode, error) {
 		return nil, fmt.Errorf("no nodes available")
 	}
 
+	now := time.Now()
 	primaryNode := nodes[0]
 
-	// Always try the first node (primary)
+	// Step 1: Try primary node first if it's healthy
 	if primaryNode.IsHealthy && primaryNode.EthClient != nil {
-		r.currentNodeIdx = 0
 		return primaryNode, nil
 	}
 
-	// If primary node is unhealthy, occasionally retry it (every 10 requests)
-	r.currentNodeIdx++
-	if r.currentNodeIdx%10 == 0 && primaryNode.EthClient != nil {
-		r.logger.Infof("Periodic retry attempt for primary node %s", primaryNode.URL)
-		return primaryNode, nil
-	}
+	// Step 2: Primary recovery check (BEFORE checking secondaries)
+	if !primaryNode.IsHealthy && primaryNode.EthClient != nil {
+		primaryNode.SkipCount++
 
-	// Otherwise, try subsequent nodes in order
-	for i := 1; i < len(nodes); i++ {
-		if nodes[i].IsHealthy && nodes[i].EthClient != nil {
-			return nodes[i], nil
+		// Check if we should retry based on skip count and minimum time
+		if r.shouldRetryNode(primaryNode, true, now) {
+			r.logger.Infof("Attempting PRIMARY node recovery: %s (failures: %d, skips: %d)",
+				primaryNode.URL, primaryNode.FailureCount, primaryNode.SkipCount)
+			primaryNode.SkipCount = 0
+			return primaryNode, nil
 		}
 	}
 
-	// If all nodes are unhealthy or have nil clients, try the first node with valid clients
-	for _, node := range nodes {
-		if node.EthClient != nil {
+	// Step 3: Check healthy secondary nodes
+	for i := 1; i < len(nodes); i++ {
+		node := nodes[i]
+		if node.IsHealthy && node.EthClient != nil {
 			return node, nil
 		}
 	}
 
-	// If no nodes have valid clients, return an error
+	// Step 4: Check if any secondary nodes are ready for retry
+	for i := 1; i < len(nodes); i++ {
+		node := nodes[i]
+		if !node.IsHealthy && node.EthClient != nil {
+			node.SkipCount++
+
+			if r.shouldRetryNode(node, false, now) {
+				r.logger.Infof("Attempting secondary node retry: %s (failures: %d, skips: %d)",
+					node.URL, node.FailureCount, node.SkipCount)
+				node.SkipCount = 0
+				return node, nil
+			}
+		}
+	}
+
+	// Step 5: Force primary node as final fallback
+	if primaryNode.EthClient != nil {
+		r.logger.Warnf("All nodes unhealthy, forcing PRIMARY node: %s", primaryNode.URL)
+		return primaryNode, nil
+	}
+
+	// Step 6: If primary has no valid client, try any node with a valid client
+	for _, node := range nodes {
+		if node.EthClient != nil {
+			r.logger.Warnf("Primary node unavailable, using node: %s", node.URL)
+			return node, nil
+		}
+	}
+
 	return nil, fmt.Errorf("no nodes with valid connections available")
+}
+
+// shouldRetryNode determines if a node should be retried based on skip count and time
+func (r *RPCHelper) shouldRetryNode(node *RPCNode, isPrimary bool, now time.Time) bool {
+	// Use configured minimum time gate to prevent hammering
+	if now.Sub(node.LastFailTime) < r.config.MinRetryTime {
+		return false
+	}
+
+	// Calculate required skip count based on failure count and node type
+	requiredSkips := r.calculateRequiredSkips(node.FailureCount, isPrimary)
+
+	return node.SkipCount >= requiredSkips
+}
+
+// calculateRequiredSkips returns how many requests to skip before retry
+func (r *RPCHelper) calculateRequiredSkips(failureCount int, isPrimary bool) int {
+	var retrySchedule []int
+
+	if isPrimary {
+		retrySchedule = r.config.PrimaryRetryAfterRequests
+	} else {
+		retrySchedule = r.config.SecondaryRetryAfterRequests
+	}
+
+	// If failure count is within the configured schedule, use it
+	if failureCount > 0 && failureCount <= len(retrySchedule) {
+		return retrySchedule[failureCount-1]
+	}
+
+	// For failures beyond the configured schedule, use the last value
+	if len(retrySchedule) > 0 {
+		return retrySchedule[len(retrySchedule)-1]
+	}
+
+	// Fallback (should never happen due to defaults)
+	if isPrimary {
+		return 20
+	}
+	return 40
 }
 
 // switchToNode marks a node as healthy and updates its usage timestamp
@@ -241,6 +340,9 @@ func (r *RPCHelper) switchToNode(nodeURL string, useArchive bool) {
 			wasUnhealthy := !node.IsHealthy
 			node.IsHealthy = true
 			node.LastUsed = time.Now()
+			node.FailureCount = 0           // Reset failure count on recovery
+			node.SkipCount = 0              // Reset skip count on recovery
+			node.LastFailTime = time.Time{} // Reset last fail time on recovery
 
 			// Send alert for node recovery if it was previously unhealthy
 			if wasUnhealthy {
@@ -268,12 +370,15 @@ func (r *RPCHelper) markNodeUnhealthy(nodeURL string, err error) {
 			wasHealthy := node.IsHealthy
 			node.IsHealthy = false
 			node.LastError = err
-			r.logger.Warnf("Marked node unhealthy: %s, error: %v", nodeURL, err)
+			node.FailureCount++
+			node.LastFailTime = time.Now()
+			// Don't increment SkipCount here - it's incremented in getCurrentNode
+			r.logger.Warnf("Marked node unhealthy: %s, error: %v, failure count: %d", nodeURL, err, node.FailureCount)
 
 			// Send alert for node failure if it was previously healthy
 			if wasHealthy {
 				reporting.SendWarningAlert("rpc-helper",
-					fmt.Sprintf("Full node %s has become unhealthy: %v", nodeURL, err))
+					fmt.Sprintf("Full node %s has become unhealthy: %v, failure count: %d", nodeURL, err, node.FailureCount))
 			}
 
 			return
@@ -285,12 +390,15 @@ func (r *RPCHelper) markNodeUnhealthy(nodeURL string, err error) {
 			wasHealthy := node.IsHealthy
 			node.IsHealthy = false
 			node.LastError = err
-			r.logger.Warnf("Marked archive node unhealthy: %s, error: %v", nodeURL, err)
+			node.FailureCount++
+			node.LastFailTime = time.Now()
+			// Don't increment SkipCount here - it's incremented in getCurrentNode
+			r.logger.Warnf("Marked archive node unhealthy: %s, error: %v, failure count: %d", nodeURL, err, node.FailureCount)
 
 			// Send alert for archive node failure if it was previously healthy
 			if wasHealthy {
 				reporting.SendWarningAlert("rpc-helper",
-					fmt.Sprintf("Archive node %s has become unhealthy: %v", nodeURL, err))
+					fmt.Sprintf("Archive node %s has become unhealthy: %v, failure count: %d", nodeURL, err, node.FailureCount))
 			}
 
 			return
