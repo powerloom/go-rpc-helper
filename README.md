@@ -371,6 +371,144 @@ go func() {
 }()
 ```
 
+## Testing
+
+The RPC helper includes comprehensive tests covering node management, failover logic, retry mechanisms, and error handling.
+
+### Running Tests
+
+```bash
+# Run all tests
+go test -v
+
+# Run tests with coverage
+go test -v -cover
+
+# Run specific test suites
+go test -v -run TestNodeManagement
+go test -v -run TestRetryScheduleCalculation
+go test -v -run TestGetCurrentNodeEdgeCases
+
+# Run tests with race detection
+go test -v -race
+
+# Run tests with timeout
+go test -v -timeout 30s
+```
+
+### Test Categories
+
+#### Node Management Tests
+```bash
+# Test primary node prioritization and failover
+go test -v -run "TestNodeManagement/primary_node_prioritization"
+go test -v -run "TestNodeManagement/failover_to_secondary"
+go test -v -run "TestNodeManagement/primary_node_recovery"
+```
+
+#### Retry Logic Tests
+```bash
+# Test retry schedule calculation
+go test -v -run "TestRetryScheduleCalculation"
+go test -v -run "TestShouldRetryNode"
+```
+
+#### Edge Case Tests
+```bash
+# Test complex scenarios and edge cases
+go test -v -run "TestGetCurrentNodeEdgeCases"
+```
+
+### Mock Server Testing
+
+The tests use a built-in mock RPC server that simulates various failure scenarios:
+
+```go
+// Example test setup
+primary := NewMockRPCServer()
+secondary := NewMockRPCServer()
+defer primary.Close()
+defer secondary.Close()
+
+// Simulate node failure
+primary.SetShouldFail(true)
+
+// Test failover behavior
+_, err := helper.BlockNumber(ctx)
+```
+
+### Test Configuration
+
+Tests use configurable retry schedules for different scenarios:
+
+```go
+config := &RPCConfig{
+    Nodes: []NodeConfig{
+        {URL: primary.URL()},
+        {URL: secondary.URL()},
+    },
+    MaxRetries:                  3,
+    RetryDelay:                  50 * time.Millisecond,
+    MaxRetryDelay:               1 * time.Second,
+    RequestTimeout:              5 * time.Second,
+    PrimaryRetryAfterRequests:   []int{2, 4, 6},    // Retry after 2, 4, 6 requests
+    SecondaryRetryAfterRequests: []int{3, 6, 9},    // Retry after 3, 6, 9 requests
+}
+```
+
+### Writing Custom Tests
+
+When writing tests for your application using the RPC helper:
+
+```go
+func TestMyApplication(t *testing.T) {
+    // Create test configuration
+    config := rpchelper.DefaultRPCConfig()
+    config.Nodes = []rpchelper.NodeConfig{
+        {URL: "http://localhost:8545"}, // Your test RPC endpoint
+    }
+    
+    // Create RPC helper
+    rpc := rpchelper.NewRPCHelper(config)
+    ctx := context.Background()
+    
+    err := rpc.Initialize(ctx)
+    require.NoError(t, err)
+    defer rpc.Close()
+    
+    // Test your application logic
+    result, err := rpc.BlockNumber(ctx)
+    assert.NoError(t, err)
+    assert.Greater(t, result, uint64(0))
+}
+```
+
+### Continuous Integration
+
+Example GitHub Actions workflow:
+
+```yaml
+name: Tests
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - uses: actions/setup-go@v2
+      with:
+        go-version: 1.21
+    
+    - name: Run tests
+      run: |
+        go test -v -race -cover ./...
+        
+    - name: Run benchmarks
+      run: |
+        go test -bench=. -benchmem
+```
+
 ## Best Practices
 
 1. **Always use context with timeout** for operations
