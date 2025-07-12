@@ -14,14 +14,16 @@ import (
 // DefaultRPCConfig returns a default configuration for the RPC helper
 func DefaultRPCConfig() *RPCConfig {
 	return &RPCConfig{
-		MaxRetries:     3,
-		RetryDelay:     500 * time.Millisecond,
-		MaxRetryDelay:  30 * time.Second,
-		RequestTimeout: 30 * time.Second,
+		MaxRetries:                  3,
+		RetryDelay:                  500 * time.Millisecond,
+		MaxRetryDelay:               30 * time.Second,
+		RequestTimeout:              30 * time.Second,
+		PrimaryRetryAfterRequests:   []int{5, 10, 20},
+		SecondaryRetryAfterRequests: []int{10, 20, 40},
 	}
 }
 
-// NewRPCConfigFromURLs creates an RPC config from a list of URLs
+// NewRPCConfigFromURLs creates an RPC config from a list of URLs with default settings
 func NewRPCConfigFromURLs(urls []string, archiveURLs []string) *RPCConfig {
 	config := DefaultRPCConfig()
 
@@ -44,12 +46,13 @@ func NewRPCConfig(
 	retryDelay time.Duration,
 	maxRetryDelay time.Duration,
 	requestTimeout time.Duration) *RPCConfig {
-	config := &RPCConfig{
-		MaxRetries:     maxRetries,
-		RetryDelay:     retryDelay,
-		MaxRetryDelay:  maxRetryDelay,
-		RequestTimeout: requestTimeout,
-	}
+
+	// Start with defaults, then override with provided values
+	config := DefaultRPCConfig()
+	config.MaxRetries = maxRetries
+	config.RetryDelay = retryDelay
+	config.MaxRetryDelay = maxRetryDelay
+	config.RequestTimeout = requestTimeout
 
 	for _, url := range urls {
 		config.Nodes = append(config.Nodes, NodeConfig{URL: url})
@@ -67,8 +70,7 @@ func NewRPCConfigWithRetrySchedule(
 	urls []string,
 	archiveURLs []string,
 	primaryRetrySchedule []int,
-	secondaryRetrySchedule []int,
-	minRetryTime time.Duration) *RPCConfig {
+	secondaryRetrySchedule []int) *RPCConfig {
 
 	config := DefaultRPCConfig()
 
@@ -78,9 +80,6 @@ func NewRPCConfigWithRetrySchedule(
 	}
 	if len(secondaryRetrySchedule) > 0 {
 		config.SecondaryRetryAfterRequests = secondaryRetrySchedule
-	}
-	if minRetryTime > 0 {
-		config.MinRetryTime = minRetryTime
 	}
 
 	// Add nodes
@@ -205,7 +204,15 @@ func HexToBlockNumber(hex string) (*big.Int, error) {
 		return nil, fmt.Errorf("hex string must start with 0x")
 	}
 
+	hexStr := hex[2:]
+	if len(hexStr) == 0 {
+		return nil, fmt.Errorf("empty hex string")
+	}
+
 	blockNum := new(big.Int)
-	blockNum.SetString(hex[2:], 16)
+	_, success := blockNum.SetString(hexStr, 16)
+	if !success {
+		return nil, fmt.Errorf("invalid hex string: %s", hex)
+	}
 	return blockNum, nil
 }
