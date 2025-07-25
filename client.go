@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -56,13 +57,14 @@ type RPCNode struct {
 
 // RPCHelper is the main RPC client wrapper
 type RPCHelper struct {
-	config         *RPCConfig
-	nodes          []*RPCNode
-	archiveNodes   []*RPCNode
-	currentNodeIdx int
-	nodeMutex      sync.RWMutex
-	logger         *log.Logger
-	initialized    bool
+	config               *RPCConfig
+	nodes                []*RPCNode
+	archiveNodes         []*RPCNode
+	currentNodeIdx       int
+	nodeMutex            sync.RWMutex
+	logger               *log.Logger
+	initialized          bool
+	operationIDCounter   atomic.Uint64
 }
 
 // RPCException represents an RPC error with detailed information
@@ -425,6 +427,8 @@ func (r *RPCHelper) executeWithRetryAndFailover(ctx context.Context, operation f
 		maxAttempts = 1
 	}
 
+	operationID := r.operationIDCounter.Add(1)
+
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		// Check if context is already cancelled
 		select {
@@ -438,6 +442,9 @@ func (r *RPCHelper) executeWithRetryAndFailover(ctx context.Context, operation f
 		if err != nil {
 			return nil, err
 		}
+
+		// Log which node is being used for the attempt
+		r.logger.Infof("Operation %d, Attempt %d: using node %s", operationID, attempt+1, node.URL)
 
 		// Create backoff strategy for this node
 		backoffStrategy := backoff.NewExponentialBackOff()

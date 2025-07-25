@@ -421,20 +421,24 @@ go test -v -run "TestGetCurrentNodeEdgeCases"
 
 ### Mock Server Testing
 
-The tests use a built-in mock RPC server that simulates various failure scenarios:
+The tests use built-in mock RPC servers that simulate various failure scenarios. The advanced tests in `node_management_ext_test.go` use a `ControllableMockServer` that can be manipulated at runtime to test failover and recovery.
 
 ```go
-// Example test setup
-primary := NewMockRPCServer()
-secondary := NewMockRPCServer()
-defer primary.Close()
-defer secondary.Close()
+// Example from TestRPCSwitchingWithFailingMock
+primaryNode := NewControllableMockServer()
+secondaryNode := NewControllableMockServer()
+defer primaryNode.Close()
+defer secondaryNode.Close()
 
-// Simulate node failure
-primary.SetShouldFail(true)
+// Simulate primary node failure
+primaryNode.SetDown(true)
 
-// Test failover behavior
-_, err := helper.BlockNumber(ctx)
+// The next call should automatically failover to the secondary node
+_, err := rpc.BlockNumber(ctx)
+assert.NoError(t, err)
+
+// Simulate primary node recovery
+primaryNode.SetDown(false)
 ```
 
 ### Test Configuration
@@ -529,3 +533,37 @@ jobs:
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details. 
+
+# Advanced Testing
+
+This document outlines the advanced testing strategy for the `go-rpc-helper` library, focusing on its failover and recovery capabilities.
+
+## Testing with Mock Servers
+
+The `node_management_ext_test.go` file contains a test called `TestRPCSwitchingWithFailingMock` that uses a controllable mock server to simulate RPC node failures. This test verifies that the `go-rpc-helper` correctly switches to a healthy node when the primary one fails, and switches back when the primary node recovers.
+
+To run this test, use the following command:
+
+```sh
+go test -v -run TestRPCSwitchingWithFailingMock
+```
+
+## Testing with Real RPC Endpoints
+
+The `node_management_ext_test.go` file also contains a test called `TestRPCWithRealEndpoints` that can be used to test the `go-rpc-helper` against real RPC endpoints. This test reads a comma-separated list of RPC URLs from the `RPC_URLS_TEST` environment variable.
+
+To run this test, first set the `RPC_URLS_TEST` environment variable to a comma-separated list of RPC URLs:
+
+```sh
+export RPC_URLS_TEST="<your_rpc_url_1>,<your_rpc_url_2>"
+```
+
+Then, run the test using the following command:
+
+```sh
+go test -v -run TestRPCWithRealEndpoints
+```
+
+### Simulating Failures with a Proxy
+
+To simulate failures with real RPC endpoints, you can use a proxy service that introduces errors, such as HTTP 5xx status codes. To do this, you would set the `RPC_URLS_TEST` environment variable to the URL of the proxy service. 
