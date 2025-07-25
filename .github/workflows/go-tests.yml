@@ -1,0 +1,37 @@
+name: Go Tests
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23.4'
+
+    - name: Run all Go tests
+      run: go test -v ./...
+
+    - name: Run advanced failover test (mocked)
+      run: go test -v -run TestRPCSwitchingWithFailingMock
+
+    # Uncomment the following step if you need to run tests against real RPC endpoints.
+    # Be cautious: This requires setting RPC_URLS_TEST as a GitHub Secret to avoid exposing API keys.
+    # - name: Run test with real RPC endpoints (optional)
+    #   run: go test -v -run TestRPCWithRealEndpoints
+    #   env:
+    #     RPC_URLS_TEST: ${{ secrets.RPC_URLS_TEST }}
