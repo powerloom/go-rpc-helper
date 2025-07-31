@@ -444,7 +444,7 @@ func (r *RPCHelper) executeWithRetryAndFailover(ctx context.Context, operation f
 		}
 
 		// Log which node is being used for the attempt
-		r.logger.Infof("Operation %d, Attempt %d: using node %s", operationID, attempt+1, node.URL)
+		r.logger.Tracef("Operation %d, Attempt %d: using node %s", operationID, attempt+1, node.URL)
 
 		// Create backoff strategy for this node
 		backoffStrategy := backoff.NewExponentialBackOff()
